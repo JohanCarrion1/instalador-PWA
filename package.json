@@ -214,7 +214,7 @@
     "@dnd-kit/sortable": "7.0.1",
     "@emotion/is-prop-valid": "1.4.0",
     "@glif/filecoin-wallet-provider": "3.0.15",
-    "@ledgerhq/hw-app-btc": "10.3.0",
+    "@ledgerhq/hw-app-btc": "12.2.0",
     "@ledgerhq/hw-app-eth": "6.45.19",
     "@ledgerhq/hw-app-solana": "6.27.1",
     "@ledgerhq/hw-transport-webhid": "6.36.0",
