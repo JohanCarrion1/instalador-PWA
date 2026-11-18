@@ -1,0 +1,41 @@
+diff --git a/ui/views/bubble/bubble_dialog_delegate_view.h b/ui/views/bubble/bubble_dialog_delegate_view.h
+index c63a5501d9728017774451adf23d0985d0aedd98..5e0c6aab78580cbeb4361e92330e7a7d672a31f6 100644
+--- a/ui/views/bubble/bubble_dialog_delegate_view.h
++++ b/ui/views/bubble/bubble_dialog_delegate_view.h
+@@ -45,6 +45,20 @@
+ #include "ui/base/cocoa/bubble_closer.h"
+ #endif
+ 
++class BraveNewsBubbleView;
++class BraveHelpBubbleDelegateView;
++class SplitViewMenuBubble;
++class WaybackMachineBubbleView;
++class SidebarItemAddedFeedbackBubble;
++class SidebarEditItemBubbleDelegateView;
++class SidebarAddItemBubbleDelegateView;
++namespace playlist {
++class PlaylistBubbleView;
++}  // namespace playlist
++namespace views {
++class BraveBubbleDialogDelegateView;
++}
++
+ class AccountChooserDialogView;
+ class AppDialogView;
+ class AnnouncementView;
+@@ -883,6 +897,15 @@ class VIEWS_EXPORT BubbleDialogDelegateView : public View,
+   gfx::Size GetMaximumSize() const final;
+ 
+  private:
++  friend class ::BraveNewsBubbleView;
++  friend class ::BraveHelpBubbleDelegateView;
++  friend class ::WaybackMachineBubbleView;
++  friend class ::playlist::PlaylistBubbleView;
++  friend class ::SplitViewMenuBubble;
++  friend class ::SidebarItemAddedFeedbackBubble;
++  friend class ::SidebarEditItemBubbleDelegateView;
++  friend class ::SidebarAddItemBubbleDelegateView;
++  friend class ::views::BraveBubbleDialogDelegateView;
+   FRIEND_TEST_ALL_PREFIXES(BubbleDelegateTest, CreateDelegate);
+   FRIEND_TEST_ALL_PREFIXES(BubbleDelegateTest, NonClientHitTest);
+ 

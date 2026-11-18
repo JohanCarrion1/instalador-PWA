@@ -1,0 +1,34 @@
+diff --git a/chrome/browser/ui/views/frame/horizontal_tab_strip_region_view.h b/chrome/browser/ui/views/frame/horizontal_tab_strip_region_view.h
+index 4b5fedc04f20b727c84e26f00c5947be7cd91f42..d845120504570e8ec4da4d5aef7f7dc2413a0259 100644
+--- a/chrome/browser/ui/views/frame/horizontal_tab_strip_region_view.h
++++ b/chrome/browser/ui/views/frame/horizontal_tab_strip_region_view.h
+@@ -7,6 +7,7 @@
+ 
+ #include <memory>
+ 
++#include "base/gtest_prod_util.h"
+ #include "base/memory/raw_ptr.h"
+ #include "build/buildflag.h"
+ #include "chrome/browser/ui/tabs/tab_data.h"
+@@ -108,13 +109,20 @@ class HorizontalTabStripRegionViewOld : public TabStripRegionView {
+ 
+   bool HasLeadingButtons() const;
+ 
++  views::Button* new_tab_button() { return new_tab_button_; }
++  TabStripComboButton* GetComboButton() { return combo_button_; }
++
+  private:
++  friend class BraveVerticalTabStripRegionView;
++  friend class BraveTabStrip;
++  friend class BraveHorizontalTabStripRegionView;
++  FRIEND_TEST_ALL_PREFIXES(VerticalTabStripBrowserTest, MinHeight);
+   // Updates the border padding for `new_tab_button_`.  This should be called
+   // whenever any input of the computation of the border's sizing changes.
+   void UpdateButtonBorders();
+ 
+   // Updates the left and right margins for the tab strip.
+-  void UpdateTabStripMargin();
++  virtual void UpdateTabStripMargin();
+ 
+   // Gets called on `Layout` and adjusts the x-axis position of the `view` based
+   // on `offset`. This should only used for views that show before tab strip.

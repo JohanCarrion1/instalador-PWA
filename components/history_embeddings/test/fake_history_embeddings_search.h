@@ -1,0 +1,92 @@
+/* Copyright (c) 2026 The Brave Authors. All rights reserved.
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+ * You can obtain one at https://mozilla.org/MPL/2.0/. */
+
+#ifndef BRAVE_COMPONENTS_HISTORY_EMBEDDINGS_TEST_FAKE_HISTORY_EMBEDDINGS_SEARCH_H_
+#define BRAVE_COMPONENTS_HISTORY_EMBEDDINGS_TEST_FAKE_HISTORY_EMBEDDINGS_SEARCH_H_
+
+#include <optional>
+#include <string>
+#include <vector>
+
+#include "base/functional/callback.h"
+#include "base/memory/weak_ptr.h"
+#include "base/time/time.h"
+#include "brave/components/history_embeddings/core/history_embeddings_search.h"
+#include "brave/components/history_embeddings/core/vector_database.h"
+#include "components/history/core/browser/history_types.h"
+
+class GURL;
+
+namespace ai_chat {
+
+// Fake `HistoryEmbeddingsSearch` for tool tests. Records the args of the most
+// recent `Search()` call and fires a caller-configured list of
+// `ScoredUrlRow`s back asynchronously, so tests don't have to stand up a real
+// `HistoryEmbeddingsService`.
+class FakeHistoryEmbeddingsSearch
+    : public brave_history_embeddings::HistoryEmbeddingsSearch {
+ public:
+  FakeHistoryEmbeddingsSearch();
+  ~FakeHistoryEmbeddingsSearch() override;
+
+  FakeHistoryEmbeddingsSearch(const FakeHistoryEmbeddingsSearch&) = delete;
+  FakeHistoryEmbeddingsSearch& operator=(const FakeHistoryEmbeddingsSearch&) =
+      delete;
+
+  // Builds a `ScoredUrlRow` suitable for `SetScoredRows()`. Convenience for
+  // tests that need to populate the basic fields without touching the
+  // embeddings details.
+  static brave_history_embeddings::ScoredUrlRow MakeRow(
+      history::URLID url_id,
+      const GURL& url,
+      const std::u16string& title,
+      base::Time last_visit,
+      float score);
+
+  // Sets the rows that subsequent `Search()` calls will return.
+  void SetScoredRows(std::vector<brave_history_embeddings::ScoredUrlRow> rows);
+
+  // Mirrors `HistoryEmbeddingsService::AsWeakPtr()`, which is how production
+  // callers hold the search across asynchronous work.
+  base::WeakPtr<brave_history_embeddings::HistoryEmbeddingsSearch>
+  GetWeakPtr() {
+    return weak_ptr_factory_.GetWeakPtr();
+  }
+
+  // Mirrors what `HistoryEmbeddingsService::Shutdown()` does: the object
+  // stays alive, but pointers handed out earlier stop resolving.
+  void InvalidateWeakPtrs() { weak_ptr_factory_.InvalidateWeakPtrs(); }
+
+  // Captured args from the most recent `Search()` call.
+  const std::string& last_query() const { return last_query_; }
+  const std::optional<base::Time>& last_time_range_start() const {
+    return last_time_range_start_;
+  }
+  size_t last_count() const { return last_count_; }
+  const std::vector<history::URLID>& last_url_id_filter() const {
+    return last_url_id_filter_;
+  }
+
+  // `HistoryEmbeddingsSearch`:
+  brave_history_embeddings::SearchResult Search(
+      brave_history_embeddings::SearchResult* previous_search_result,
+      std::string query,
+      std::optional<base::Time> time_range_start,
+      size_t count,
+      std::vector<history::URLID> url_id_filter,
+      brave_history_embeddings::SearchResultCallback callback) override;
+
+ private:
+  std::vector<brave_history_embeddings::ScoredUrlRow> scored_rows_;
+  std::string last_query_;
+  std::optional<base::Time> last_time_range_start_;
+  size_t last_count_ = 0;
+  std::vector<history::URLID> last_url_id_filter_;
+  base::WeakPtrFactory<FakeHistoryEmbeddingsSearch> weak_ptr_factory_{this};
+};
+
+}  // namespace ai_chat
+
+#endif  // BRAVE_COMPONENTS_HISTORY_EMBEDDINGS_TEST_FAKE_HISTORY_EMBEDDINGS_SEARCH_H_

@@ -1,0 +1,24 @@
+diff --git a/chrome/app/chrome_main.cc b/chrome/app/chrome_main.cc
+index 199142d67135ea46b9aa232c0283ad7d21f7b3f1..811df182b7680d544db5fdfc15302efd8e3e5515 100644
+--- a/chrome/app/chrome_main.cc
++++ b/chrome/app/chrome_main.cc
+@@ -18,6 +18,7 @@
+ #include "base/no_destructor.h"
+ #include "base/sampling_heap_profiler/poisson_allocation_sampler.h"
+ #include "base/time/time.h"
++#include "brave/app/brave_main_delegate.h"
+ #include "build/build_config.h"
+ #if !defined(BUILDING_CHROME_RENDERER)
+ #include "chrome/app/chrome_main_delegate.h"
+@@ -129,9 +130,9 @@ int ChromeMain(int argc, const char** argv) {
+       base::TimeTicks::FromInternalValue(exe_entry_point_ticks),
+       base::TimeTicks::FromInternalValue(preread_begin_ticks),
+       base::TimeTicks::FromInternalValue(preread_end_ticks)};
+-  ChromeMainDelegate chrome_main_delegate(timestamps);
++  BraveMainDelegate chrome_main_delegate(timestamps);
+ #else  // BUILDFLAG(IS_WIN)
+-  ChromeMainDelegate chrome_main_delegate(
++  BraveMainDelegate chrome_main_delegate(
+       {.exe_entry_point_ticks = base::TimeTicks::Now()});
+ #endif
+   content::ContentMainParams params(&chrome_main_delegate);

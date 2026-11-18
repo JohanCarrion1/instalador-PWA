@@ -1,0 +1,27 @@
+diff --git a/chrome/browser/ui/views/frame/system_menu_model_builder.h b/chrome/browser/ui/views/frame/system_menu_model_builder.h
+index ee3e4c24425626006772267288b9d9191ddc7622..00dd568444ed00afeed6ae8a1d005f924d0100de 100644
+--- a/chrome/browser/ui/views/frame/system_menu_model_builder.h
++++ b/chrome/browser/ui/views/frame/system_menu_model_builder.h
+@@ -37,7 +37,7 @@ class SystemMenuModelBuilder {
+   SystemMenuModelBuilder(const SystemMenuModelBuilder&) = delete;
+   SystemMenuModelBuilder& operator=(const SystemMenuModelBuilder&) = delete;
+ 
+-  ~SystemMenuModelBuilder();
++  virtual ~SystemMenuModelBuilder();
+ 
+   // Populates the menu.
+   void Init();
+@@ -46,11 +46,12 @@ class SystemMenuModelBuilder {
+   ui::MenuModel* menu_model() { return menu_model_.get(); }
+ 
+  private:
++  friend class BraveSystemMenuModelBuilder;
+   BrowserWindowInterface* browser() { return menu_delegate_.browser(); }
+ 
+   // Populates |model| with the appropriate contents.
+   void BuildMenu(ui::SimpleMenuModel* model);
+-  void BuildSystemMenuForBrowserWindow(ui::SimpleMenuModel* model);
++  virtual void BuildSystemMenuForBrowserWindow(ui::SimpleMenuModel* model);
+   void BuildSystemMenuForAppOrPopupWindow(ui::SimpleMenuModel* model);
+ 
+ #if BUILDFLAG(IS_CHROMEOS)

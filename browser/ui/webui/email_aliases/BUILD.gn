@@ -1,0 +1,48 @@
+# Copyright (c) 2025 The Brave Authors. All rights reserved.
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this file,
+# You can obtain one at https://mozilla.org/MPL/2.0/.
+
+import("//brave/components/email_aliases/buildflags/buildflags.gni")
+
+assert(enable_email_aliases)
+
+source_set("email_aliases") {
+  sources = [
+    "email_aliases_panel_ui.cc",
+    "email_aliases_panel_ui.h",
+    "email_aliases_promo_ui.cc",
+    "email_aliases_promo_ui.h",
+  ]
+
+  deps = [
+    "//base",
+    "//brave/browser/brave_account",
+    "//brave/browser/email_aliases",
+    "//brave/browser/resources/settings:resources",
+    "//brave/browser/resources/settings:resources_grit",
+    "//brave/browser/ui/brave_account",
+    "//brave/components/brave_account",
+    "//brave/components/brave_account/mojom",
+    "//brave/components/brave_account/resources",
+    "//brave/components/constants",
+    "//brave/components/email_aliases:features",
+    "//brave/components/email_aliases:mojom",
+    "//brave/components/email_aliases:service",
+    "//brave/components/resources:static_resources_grit",
+    "//brave/components/resources:strings_grit",
+    "//chrome/browser/profiles:profile",
+    "//chrome/browser/ui/webui",
+    "//ui/webui",
+    "//url",
+  ]
+
+  if (!is_android) {
+    sources += [
+      "theme_helper.cc",
+      "theme_helper.h",
+    ]
+
+    deps += [ "//chrome/browser/ui/webui:theme_source" ]
+  }
+}

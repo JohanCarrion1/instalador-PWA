@@ -1,0 +1,13 @@
+include_rules = [
+  "+components/history/core/browser",
+  "+components/history_embeddings",
+]
+
+specific_include_rules = {
+  ".*_unittest\.cc": [
+    "+components/history/core/test",
+    "+components/os_crypt/async/browser",
+    "+components/page_content_annotations/content",
+    "+components/passage_embeddings/core",
+  ],
+}

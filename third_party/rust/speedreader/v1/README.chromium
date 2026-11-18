@@ -1,0 +1,9 @@
+Name: speedreader
+URL: https://crates.io/crates/speedreader
+Version: 1.0.0
+License: MPL-2.0
+License File: //brave/components/speedreader/rust/lib/../../../../common/licenses/MPL-2.0
+Shipped: yes
+Security Critical: yes
+
+Description: 

@@ -1,0 +1,66 @@
+/* Copyright (c) 2026 The Brave Authors. All rights reserved.
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+ * You can obtain one at https://mozilla.org/MPL/2.0/. */
+
+#include "brave/browser/ui/views/frame/layout/brave_browser_view_tabbed_layout_impl.h"
+
+#include <chrome/browser/ui/views/frame/layout/browser_view_tabbed_layout_impl.cc>
+
+// `BrowserViewTabbedLayoutImpl::SeparatorInfo` is a private nested struct
+// defined inside the upstream .cc above. Defining the override here keeps the
+// struct out of any header while still letting Brave consolidate the old
+// `GetTopSeparatorType()` / `ShadowOverlayVisible()` tweaks into a single
+// hook.
+BrowserViewTabbedLayoutImpl::SeparatorInfo
+BraveBrowserViewTabbedLayoutImpl::CalculateSeparatorInfo() const {
+  // Suppress every top separator when there is no visible top UI (toolbar and
+  // bookmark bar). This fixes a 1px visible separator at the top of the
+  // contents view when in browser fullscreen, where the top chrome is hidden.
+  if (!delegate().IsToolbarVisible() && !delegate().IsBookmarkBarVisible()) {
+    return SeparatorInfo();
+  }
+
+  SeparatorInfo info = BrowserViewTabbedLayoutImpl::CalculateSeparatorInfo();
+
+  // Brave manages its own rounded-corners shadow around the contents and side
+  // panel via BraveContentsViewUtil. Suppress the upstream shadow overlay (and
+  // its accompanying main-area padding) so it doesn't double up.
+  info.shadow_box = false;
+
+  if (delegate().ShouldUseBraveWebViewRoundedCornersForContents()) {
+    // Whatever sits below the top container - the infobar card or the contents
+    // view - is rounded and outlined itself, so it already reads as divided
+    // from the top chrome and a separator would just double up.
+    info.top_container_separator = false;
+    info.multi_contents_separator = false;
+  } else if (!info.top_container_separator) {
+    // Brave wants the divider at the top container's edge rather than inside
+    // the multi-contents view, so promote upstream's choice to a full-width
+    // top-container separator.
+    info.top_container_separator = true;
+    info.multi_contents_separator = false;
+  }
+
+  return info;
+}
+
+bool BraveBrowserViewTabbedLayoutImpl::GetTopContainerSeparatorForTesting()
+    const {
+  return CalculateSeparatorInfo().top_container_separator;
+}
+
+bool BraveBrowserViewTabbedLayoutImpl::GetMultiContentsSeparatorForTesting()
+    const {
+  return CalculateSeparatorInfo().multi_contents_separator;
+}
+
+bool BraveBrowserViewTabbedLayoutImpl::GetShadowBoxForTesting() const {
+  return CalculateSeparatorInfo().shadow_box;
+}
+
+void BraveBrowserViewTabbedLayoutImpl::SetWindowStateForTesting(
+    BrowserViewLayoutDelegate::WindowState window_state) {
+  layout_data_ = std::make_unique<TransientLayoutData>(BrowserLayoutParams());
+  layout_data_->window_state = window_state;
+}

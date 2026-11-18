@@ -1,0 +1,22 @@
+diff --git a/components/contextual_tasks/public/features.cc b/components/contextual_tasks/public/features.cc
+index 72db1d4ba7f1cae715f6f5e4a2ca7214ae98ed76..5b07d8c7ca503bcc3aedcaa22c1d8652ac23ae24 100644
+--- a/components/contextual_tasks/public/features.cc
++++ b/components/contextual_tasks/public/features.cc
+@@ -35,7 +35,7 @@ std::optional<bool> g_sticky_conversation_enabled_override;
+ namespace contextual_tasks {
+ 
+ // Enables the contextual tasks side panel while browsing.
+-BASE_FEATURE(kContextualTasks, base::FEATURE_DISABLED_BY_DEFAULT);
++BASE_OVERRIDDEN_FEATURE(kContextualTasks, base::FEATURE_DISABLED_BY_DEFAULT);
+ BASE_FEATURE(kContextualTasksPrivateApiNoAnimation,
+              base::FEATURE_DISABLED_BY_DEFAULT);
+ 
+@@ -364,7 +364,7 @@ BASE_FEATURE(kContextualTasksOverrideShowBottomSheetOnLargeScreen,
+              base::FEATURE_DISABLED_BY_DEFAULT);
+ 
+ // Enables prefetching of cookies for contextual tasks.
+-BASE_FEATURE(kContextualTasksCookiePrefetch, base::FEATURE_DISABLED_BY_DEFAULT);
++BASE_OVERRIDDEN_FEATURE(kContextualTasksCookiePrefetch, base::FEATURE_DISABLED_BY_DEFAULT);
+ 
+ BASE_FEATURE(kAimTriggeredThreadLinks, base::FEATURE_ENABLED_BY_DEFAULT);
+ 

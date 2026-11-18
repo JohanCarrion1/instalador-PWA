@@ -1,0 +1,895 @@
+/* Copyright (c) 2026 The Brave Authors. All rights reserved.
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+ * You can obtain one at https://mozilla.org/MPL/2.0/. */
+
+#include "brave/browser/speech/on_device_speech_recognition_controller.h"
+
+#include <memory>
+#include <optional>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "base/containers/span.h"
+#include "base/files/file_path.h"
+#include "base/files/file_util.h"
+#include "base/files/scoped_temp_dir.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback.h"
+#include "base/location.h"
+#include "base/memory/raw_ptr.h"
+#include "base/memory/weak_ptr.h"
+#include "base/run_loop.h"
+#include "base/strings/string_view_util.h"
+#include "base/task/sequenced_task_runner.h"
+#include "base/task/thread_pool/thread_pool_instance.h"
+#include "base/test/bind.h"
+#include "base/test/run_until.h"
+#include "base/test/task_environment.h"
+#include "base/test/test_future.h"
+#include "base/time/time.h"
+#include "brave/components/local_ai/core/background_web_contents.h"
+#include "brave/components/local_ai/core/on_device_speech_models_state.h"
+#include "brave/components/local_ai/core/on_device_speech_recognition.mojom.h"
+#include "chrome/browser/profiles/profile.h"
+#include "chrome/test/base/testing_browser_process.h"
+#include "chrome/test/base/testing_profile.h"
+#include "chrome/test/base/testing_profile_manager.h"
+#include "content/public/test/browser_task_environment.h"
+#include "mojo/public/cpp/bindings/pending_receiver.h"
+#include "mojo/public/cpp/bindings/pending_remote.h"
+#include "mojo/public/cpp/bindings/receiver.h"
+#include "mojo/public/cpp/bindings/remote.h"
+#include "services/on_device_model/public/mojom/on_device_model.mojom.h"
+#include "testing/gmock/include/gmock/gmock.h"
+#include "testing/gtest/include/gtest/gtest.h"
+
+namespace speech {
+
+namespace {
+
+// Renderer-side worker stand-in. Records how often the browser loaded the
+// model (Init) and manufactured a stream (CreateAsrStream), and lets a test
+// force a load failure or sever the pipe.
+class FakeSpeechRecognitionFactory
+    : public local_ai::mojom::SpeechRecognitionFactory {
+ public:
+  FakeSpeechRecognitionFactory() = default;
+  ~FakeSpeechRecognitionFactory() override = default;
+
+  // local_ai::mojom::SpeechRecognitionFactory:
+  void Init(local_ai::mojom::OrtModelFilesPtr files,
+            InitCallback callback) override {
+    ++init_count_;
+    last_tokens_ = std::string(base::as_string_view(base::span(files->tokens)));
+    if (on_call_) {
+      on_call_.Run();
+    }
+    std::move(callback).Run(init_success_);
+  }
+  void CreateAsrStream(
+      on_device_model::mojom::AsrStreamOptionsPtr options,
+      mojo::PendingReceiver<on_device_model::mojom::AsrStreamInput> stream,
+      mojo::PendingRemote<on_device_model::mojom::AsrStreamResponder> responder)
+      override {
+    ++created_asr_stream_count_;
+    languages_.push_back(options->language.value_or(""));
+    if (on_call_) {
+      on_call_.Run();
+    }
+  }
+
+  mojo::PendingRemote<local_ai::mojom::SpeechRecognitionFactory> BindRemote() {
+    return receiver_.BindNewPipeAndPassRemote();
+  }
+  void ResetReceiver() { receiver_.reset(); }
+
+  void set_init_success(bool success) { init_success_ = success; }
+  int init_count() const { return init_count_; }
+  int created_asr_stream_count() const { return created_asr_stream_count_; }
+  // The tokens file of the last model loaded, which the fixture fills with the
+  // model's directory name.
+  const std::string& last_tokens() const { return last_tokens_; }
+  // The language of each stream, in order.
+  const std::vector<std::string>& languages() const { return languages_; }
+
+  // Runs on every Init/CreateAsrStream so a test can quit a RunLoop once the
+  // counts reach what it is waiting for.
+  void set_on_call(base::RepeatingClosure on_call) {
+    on_call_ = std::move(on_call);
+  }
+
+ private:
+  bool init_success_ = true;
+  int init_count_ = 0;
+  int created_asr_stream_count_ = 0;
+  std::string last_tokens_;
+  std::vector<std::string> languages_;
+  base::RepeatingClosure on_call_;
+  mojo::Receiver<local_ai::mojom::SpeechRecognitionFactory> receiver_{this};
+};
+
+// Stand-in for the worker's BackgroundWebContents. Needs no renderer; runs an
+// on-destroyed closure so the fixture can observe teardown, and can simulate an
+// unexpected renderer loss.
+class FakeBackgroundWebContents : public local_ai::BackgroundWebContents {
+ public:
+  FakeBackgroundWebContents(Delegate* delegate, base::OnceClosure on_destroyed)
+      : delegate_(delegate), on_destroyed_(std::move(on_destroyed)) {}
+  ~FakeBackgroundWebContents() override { std::move(on_destroyed_).Run(); }
+
+  void SimulateDestroyed() {
+    delegate_->OnBackgroundContentsDestroyed(DestroyReason::kRendererGone);
+  }
+
+ private:
+  raw_ptr<Delegate> delegate_;
+  base::OnceClosure on_destroyed_;
+};
+
+// The same value as the private `kIdleTimeout` of the controller.
+constexpr base::TimeDelta kIdleTimeout = base::Seconds(60);
+
+}  // namespace
+
+class OnDeviceSpeechRecognitionControllerTest : public testing::Test {
+ protected:
+  OnDeviceSpeechRecognitionControllerTest()
+      : task_environment_(base::test::TaskEnvironment::TimeSource::MOCK_TIME) {}
+
+  // One recognition's worth of pipes, kept alive for the test's duration.
+  struct Session {
+    Session() = default;
+    Session(Session&&) = default;
+    Session& operator=(Session&&) = default;
+    ~Session() = default;
+
+    // Closes all the pipes, as the engine does at the end of a recognition.
+    void Reset() {
+      session.reset();
+      input.reset();
+      responder_receiver.reset();
+    }
+
+    mojo::Remote<local_ai::mojom::AsrSession> session;
+    mojo::Remote<on_device_model::mojom::AsrStreamInput> input;
+    mojo::PendingReceiver<on_device_model::mojom::AsrStreamResponder>
+        responder_receiver;
+  };
+
+  void SetUp() override {
+    ASSERT_TRUE(temp_dir_.CreateUniqueTempDir());
+    // A real ProfileManager: the boot flow observes it and refuses to start a
+    // worker without one.
+    profile_manager_.emplace(TestingBrowserProcess::GetGlobal());
+    ASSERT_TRUE(profile_manager_->SetUp());
+    controller_ = OnDeviceSpeechRecognitionController::CreateForTesting(
+        base::BindRepeating(
+            &OnDeviceSpeechRecognitionControllerTest::CreateFakeBwc,
+            base::Unretained(this)));
+  }
+
+  void TearDown() override {
+    controller_.reset();
+    // The models state is a process-wide singleton, so clear it to avoid
+    // polluting other suites.
+    auto* state = local_ai::OnDeviceSpeechModelsState::GetInstance();
+    state->SetInstallDir(local_ai::OnDeviceSpeechModel::kEnglish,
+                         base::FilePath());
+    state->SetInstallDir(local_ai::OnDeviceSpeechModel::kMultilingual,
+                         base::FilePath());
+  }
+
+  // Injected BackgroundWebContents factory. Three modes drive the states the
+  // production async pipeline produces: synchronous success, an async creation
+  // failure, and a captured (deferred) reply for stale-reply tests.
+  void CreateFakeBwc(
+      base::WeakPtr<local_ai::BackgroundWebContents::Delegate> delegate,
+      local_ai::BackgroundWebContentsCreatedCallback created) {
+    ++bwc_created_count_;
+    if (capture_created_) {
+      // Hold the reply plus delegate so a test can deliver a stale reply after
+      // a teardown or restart, without completing this cycle's creation.
+      captured_delegate_ = std::move(delegate);
+      captured_created_ = std::move(created);
+      return;
+    }
+    if (bwc_creation_fails_) {
+      // Production builds the worker asynchronously (guest profile creation),
+      // so the failure is reported on a later turn, not inline. Match that so
+      // Start() finishes queuing before the teardown happens.
+      base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
+          FROM_HERE,
+          base::BindOnce(std::move(created),
+                         std::unique_ptr<local_ai::BackgroundWebContents>(),
+                         nullptr));
+      return;
+    }
+    std::move(created).Run(MakeFakeBwc(delegate, &last_bwc_), &otr_profile_);
+  }
+
+  // Builds a fake worker BackgroundWebContents that nulls `*tracker` when the
+  // controller drops it, so a test can observe teardown.
+  std::unique_ptr<FakeBackgroundWebContents> MakeFakeBwc(
+      base::WeakPtr<local_ai::BackgroundWebContents::Delegate> delegate,
+      raw_ptr<FakeBackgroundWebContents>* tracker) {
+    auto bwc = std::make_unique<FakeBackgroundWebContents>(
+        delegate.get(),
+        base::BindOnce(
+            [](raw_ptr<FakeBackgroundWebContents>* ref, int* destroyed_count) {
+              *ref = nullptr;
+              ++*destroyed_count;
+            },
+            tracker, &bwc_destroyed_count_));
+    *tracker = bwc.get();
+    return bwc;
+  }
+
+  void SetInstalled(bool installed,
+                    local_ai::OnDeviceSpeechModel model =
+                        local_ai::OnDeviceSpeechModel::kEnglish) {
+    auto* state = local_ai::OnDeviceSpeechModelsState::GetInstance();
+    if (!installed) {
+      state->SetInstallDir(model, base::FilePath());
+      return;
+    }
+    state->SetInstallDir(model, temp_dir_.GetPath());
+    base::FilePath model_dir = state->GetModelDir(model);
+    ASSERT_TRUE(base::CreateDirectory(model_dir));
+    // ReadNemotronOrtFiles only needs these to exist and be non-empty; the
+    // contents are ignored by the fake factory's Init.
+    for (const char* name :
+         {"encoder.onnx", "encoder.onnx.data", "decoder_joint.onnx",
+          "decoder_joint.onnx.data", "filterbank.bin"}) {
+      ASSERT_TRUE(base::WriteFile(model_dir.AppendASCII(name), "x"));
+    }
+    // Tells the fake factory which model it loaded.
+    ASSERT_TRUE(base::WriteFile(model_dir.AppendASCII("tokens.txt"),
+                                local_ai::GetModelDirName(model)));
+  }
+
+  // Acts as the worker WebUI: registers the given factory so the browser can
+  // load the model. Does not wait for the load to finish.
+  void RegisterFactoryWith(FakeSpeechRecognitionFactory& factory) {
+    // Only one worker page ever holds the FactoryHost interface, so keep a
+    // single host remote and supersede any previous one, mirroring the
+    // controller's own single receiver that reset()s on each rebind.
+    factory_host_.reset();
+    controller_->BindFactoryHost(factory_host_.BindNewPipeAndPassReceiver());
+    factory_host_->RegisterFactory(factory.BindRemote());
+    factory_host_.FlushForTesting();
+  }
+
+  void RegisterFactory() { RegisterFactoryWith(fake_factory_); }
+
+  // Runs the loop until `factory` has loaded the model, quitting from the
+  // factory's own Init callback.
+  void WaitForInit(FakeSpeechRecognitionFactory& factory) {
+    if (factory.init_count() >= 1) {
+      return;
+    }
+    base::RunLoop loop;
+    factory.set_on_call(base::BindLambdaForTesting([&] {
+      if (factory.init_count() >= 1) {
+        loop.Quit();
+      }
+    }));
+    loop.Run();
+    factory.set_on_call(base::RepeatingClosure());
+  }
+
+  // Runs the loop until `factory` has created at least `count` ASR streams,
+  // quitting from its own CreateAsrStream callback.
+  void WaitForCreatedAsrStreams(FakeSpeechRecognitionFactory& factory,
+                                int count) {
+    if (factory.created_asr_stream_count() >= count) {
+      return;
+    }
+    base::RunLoop loop;
+    factory.set_on_call(base::BindLambdaForTesting([&] {
+      if (factory.created_asr_stream_count() >= count) {
+        loop.Quit();
+      }
+    }));
+    loop.Run();
+    factory.set_on_call(base::RepeatingClosure());
+  }
+
+  // Starts one session and drives the worker all the way to Ready, returning
+  // the (now-forwarded) session.
+  Session DriveToReady() {
+    SetInstalled(true);
+    Session s = StartSession();
+    RegisterFactory();
+    WaitForCreatedAsrStreams(fake_factory_, 1);
+    return s;
+  }
+
+  // Registers `factory` as the new worker. Expects it to load `model` and to
+  // get only the stream in `language`.
+  void ExpectNewWorker(FakeSpeechRecognitionFactory& factory,
+                       local_ai::OnDeviceSpeechModel model,
+                       const std::string& language,
+                       const base::Location& location = FROM_HERE) {
+    SCOPED_TRACE(location.ToString());
+    RegisterFactoryWith(factory);
+    WaitForCreatedAsrStreams(factory, 1);
+    EXPECT_EQ(local_ai::GetModelDirName(model), factory.last_tokens());
+    EXPECT_THAT(factory.languages(), testing::ElementsAre(language));
+  }
+
+  // Acts as the engine: takes an AsrSession and starts one recognition.
+  Session StartSession(std::optional<std::string> language = std::nullopt) {
+    Session s;
+    s.session.Bind(controller_->GetAsrSession());
+    mojo::PendingRemote<on_device_model::mojom::AsrStreamResponder> responder;
+    s.responder_receiver = responder.InitWithNewPipeAndPassReceiver();
+    auto options = on_device_model::mojom::AsrStreamOptions::New();
+    options->language = std::move(language);
+    s.session->Start(std::move(options), s.input.BindNewPipeAndPassReceiver(),
+                     std::move(responder));
+    s.session.FlushForTesting();
+    return s;
+  }
+
+  // Runs the loop until `remote`'s peer closes, driven by the disconnect
+  // handler rather than by polling.
+  template <typename Interface>
+  void WaitForDisconnect(mojo::Remote<Interface>& remote) {
+    if (!remote.is_connected()) {
+      return;
+    }
+    base::test::TestFuture<void> disconnected;
+    remote.set_disconnect_handler(disconnected.GetCallback());
+    EXPECT_TRUE(disconnected.Wait());
+  }
+
+  content::BrowserTaskEnvironment task_environment_;
+  // Optional so that a test can destroy it, which is what fires
+  // `OnProfileManagerDestroying`.
+  std::optional<TestingProfileManager> profile_manager_;
+  // The guest OTR profile the fake reports as the worker's home. A non-null
+  // profile lets the boot flow proceed.
+  TestingProfile otr_profile_;
+  // A different profile, for asserting the observer ignores others.
+  TestingProfile other_profile_;
+  base::ScopedTempDir temp_dir_;
+  FakeSpeechRecognitionFactory fake_factory_;
+  mojo::Remote<local_ai::mojom::SpeechRecognitionFactoryHost> factory_host_;
+  raw_ptr<FakeBackgroundWebContents> last_bwc_ = nullptr;
+  // When set, the injected factory reports an async creation failure.
+  bool bwc_creation_fails_ = false;
+  // When set, CreateFakeBwc captures the reply plus delegate instead of
+  // completing creation, so a test can deliver a stale reply later.
+  bool capture_created_ = false;
+  base::WeakPtr<local_ai::BackgroundWebContents::Delegate> captured_delegate_;
+  local_ai::BackgroundWebContentsCreatedCallback captured_created_;
+  int bwc_created_count_ = 0;
+  int bwc_destroyed_count_ = 0;
+  std::unique_ptr<OnDeviceSpeechRecognitionController> controller_;
+};
+
+// ---------- Working behavior ----------
+
+// The full working path: sessions that arrive before the worker is ready boot
+// one shared worker and queue, the model loads once, every queued session is
+// forwarded when ready, and a later session forwards immediately to the same
+// worker.
+TEST_F(OnDeviceSpeechRecognitionControllerTest,
+       ForwardsSessionsOnceWorkerReady) {
+  SetInstalled(true);
+  Session s1 = StartSession();
+  Session s2 = StartSession();
+  EXPECT_EQ(1, bwc_created_count_);
+  EXPECT_EQ(0, fake_factory_.created_asr_stream_count());
+
+  RegisterFactory();
+  WaitForCreatedAsrStreams(fake_factory_, 2);
+  EXPECT_EQ(1, fake_factory_.init_count());
+  EXPECT_EQ(2, fake_factory_.created_asr_stream_count());
+
+  // A session started on the now-ready worker is forwarded immediately, with
+  // no new worker booted.
+  Session s3 = StartSession();
+  WaitForCreatedAsrStreams(fake_factory_, 3);
+  EXPECT_EQ(1, bwc_created_count_);
+}
+
+// The worker starts with the model of the first session's locale, and gets the
+// locale's tag, not the page's tag.
+TEST_F(OnDeviceSpeechRecognitionControllerTest,
+       StartsWithTheModelAndTagOfTheSessionsLocale) {
+  SetInstalled(true, local_ai::OnDeviceSpeechModel::kMultilingual);
+  Session s = StartSession("de-AT");
+  ExpectNewWorker(fake_factory_, local_ai::OnDeviceSpeechModel::kMultilingual,
+                  "de-DE");
+}
+
+// While another session is connected, a session for the other model is
+// refused, and the worker keeps its model.
+TEST_F(OnDeviceSpeechRecognitionControllerTest,
+       SessionForTheOtherModelIsRefusedWhileAnotherIsConnected) {
+  Session english = DriveToReady();
+  SetInstalled(true, local_ai::OnDeviceSpeechModel::kMultilingual);
+
+  Session multilingual = StartSession("es-ES");
+  WaitForDisconnect(multilingual.input);
+  EXPECT_EQ(0, bwc_destroyed_count_);
+
+  // The worker still serves English: the next English session goes to it.
+  Session english_again = StartSession("en-GB");
+  WaitForCreatedAsrStreams(fake_factory_, 2);
+  EXPECT_THAT(fake_factory_.languages(),
+              testing::ElementsAre("en-US", "en-US"));
+}
+
+// Once the sessions of the first model ended, a session for the other model
+// stops the worker, so that its model leaves memory, and gets a new worker with
+// the other model. That worker idles out after the session ends.
+TEST_F(OnDeviceSpeechRecognitionControllerTest,
+       SessionForTheOtherModelGetsANewWorkerUntilItEnds) {
+  Session english = DriveToReady();
+  SetInstalled(true, local_ai::OnDeviceSpeechModel::kMultilingual);
+  english.Reset();
+  ASSERT_TRUE(base::test::RunUntil(
+      [&] { return controller_->asr_session_count_for_testing() == 0; }));
+
+  Session multilingual = StartSession("es-ES");
+  ASSERT_EQ(1, bwc_destroyed_count_);
+  FakeSpeechRecognitionFactory multilingual_factory;
+  ExpectNewWorker(multilingual_factory,
+                  local_ai::OnDeviceSpeechModel::kMultilingual, "es-ES");
+
+  multilingual.Reset();
+  task_environment_.FastForwardBy(kIdleTimeout + base::Seconds(1));
+  EXPECT_EQ(nullptr, last_bwc_.get());
+}
+
+// An English session ends while the controller waits for the read of the
+// English model files. Then a Spanish session stops worker 1 and gets worker 2.
+// The English `OnOrtFilesRead()` is dropped, so worker 2 loads only the
+// multilingual model.
+TEST_F(OnDeviceSpeechRecognitionControllerTest,
+       SessionForTheOtherModelStopsTheWorkerBeforeTheReadResult) {
+  SetInstalled(true);
+  SetInstalled(true, local_ai::OnDeviceSpeechModel::kMultilingual);
+
+  // Worker 1 starts. The English session ends before worker 1 is ready.
+  Session english = StartSession();
+  english.Reset();
+  ASSERT_TRUE(base::test::RunUntil(
+      [&] { return controller_->asr_session_count_for_testing() == 0; }));
+
+  // Worker 1 registers its factory, and the controller posts the English read.
+  // From here until worker 2's factory is bound, the test runs no loop, because
+  // a loop can run the English `OnOrtFilesRead()`. Thus it calls the controller
+  // directly.
+  controller_->RegisterFactory(fake_factory_.BindRemote());
+
+  // Start the Spanish session directly, not with StartSession(). It is the only
+  // connected session, so Start() stops worker 1, and StopWorker() makes the
+  // weak pointer of the English `OnOrtFilesRead()` invalid.
+  Session spanish;
+  spanish.session.Bind(controller_->GetAsrSession());
+  mojo::PendingRemote<on_device_model::mojom::AsrStreamResponder> responder;
+  spanish.responder_receiver = responder.InitWithNewPipeAndPassReceiver();
+  auto options = on_device_model::mojom::AsrStreamOptions::New();
+  options->language = "es-ES";
+  controller_->Start(std::move(options),
+                     spanish.input.BindNewPipeAndPassReceiver(),
+                     std::move(responder));
+  ASSERT_EQ(1, bwc_destroyed_count_)
+      << "Start() for the other model must stop worker 1 while the controller "
+         "waits for the English read result.";
+
+  // Let the English read end on the thread pool. FlushForTesting() only waits
+  // for the thread pool, so the English `OnOrtFilesRead()` stays first in the
+  // main-thread queue. Then bind worker 2's factory, so that the
+  // `factory_.is_bound()` check in `OnOrtFilesRead()` passes. The loop then
+  // runs the English `OnOrtFilesRead()` before worker 2 gets the Spanish
+  // stream, and only the invalid weak pointer can drop it.
+  base::ThreadPoolInstance::Get()->FlushForTesting();
+  FakeSpeechRecognitionFactory multilingual_factory;
+  controller_->RegisterFactory(multilingual_factory.BindRemote());
+  WaitForCreatedAsrStreams(multilingual_factory, 1);
+  EXPECT_EQ(1, multilingual_factory.init_count());
+  EXPECT_EQ(
+      local_ai::GetModelDirName(local_ai::OnDeviceSpeechModel::kMultilingual),
+      multilingual_factory.last_tokens());
+  EXPECT_THAT(multilingual_factory.languages(), testing::ElementsAre("es-ES"));
+}
+
+// ---------- Error and edge handling ----------
+
+TEST_F(OnDeviceSpeechRecognitionControllerTest,
+       StartWithNoModelDropsSessionNoBoot) {
+  SetInstalled(false);
+  Session s = StartSession();
+  // No worker is spun up just to discover the files are missing.
+  EXPECT_EQ(nullptr, last_bwc_.get());
+  EXPECT_EQ(0, bwc_created_count_);
+  // The session's audio pipe is dropped, surfacing as a failure to the engine.
+  WaitForDisconnect(s.input);
+  EXPECT_FALSE(s.input.is_connected());
+}
+
+// A session in a language that no model serves, or whose model is not
+// installed, starts no worker, and its pipes are dropped.
+TEST_F(OnDeviceSpeechRecognitionControllerTest,
+       StartWithoutAModelForItsLanguageDropsSessionNoBoot) {
+  SetInstalled(true);
+  Session unserved = StartSession("pl-PL");
+  Session not_installed = StartSession("es-ES");
+  EXPECT_EQ(0, bwc_created_count_);
+  WaitForDisconnect(unserved.input);
+  WaitForDisconnect(not_installed.input);
+}
+
+// A worker whose environment fails to come up tears down, drops the queued
+// session, and returns to idle so a later Start() reboots cleanly.
+TEST_F(OnDeviceSpeechRecognitionControllerTest, BwcCreationFailureTearsDown) {
+  SetInstalled(true);
+  bwc_creation_fails_ = true;
+
+  Session s = StartSession();
+  WaitForDisconnect(s.input);
+  EXPECT_EQ(nullptr, last_bwc_.get());
+
+  // Back to idle: a later attempt succeeds once creation works again.
+  bwc_creation_fails_ = false;
+  Session s2 = StartSession();
+  EXPECT_NE(nullptr, last_bwc_.get());
+  EXPECT_EQ(2, bwc_created_count_);
+}
+
+// Renderer loss is reported through the delegate. TearDown is deferred off the
+// observer callback (resetting the BackgroundWebContents synchronously would
+// destroy it from inside its own destroy notification), so the worker is still
+// present until the loop is pumped.
+TEST_F(OnDeviceSpeechRecognitionControllerTest,
+       BackgroundContentsDestroyedTearsDownDeferred) {
+  SetInstalled(true);
+  Session s = StartSession();
+  ASSERT_NE(nullptr, last_bwc_.get());
+
+  last_bwc_->SimulateDestroyed();
+  // The teardown is posted, not run inline, so the worker is still present.
+  EXPECT_NE(nullptr, last_bwc_.get());
+
+  // The deferred teardown disconnects the engine-held session and drops the
+  // worker.
+  WaitForDisconnect(s.session);
+  EXPECT_EQ(nullptr, last_bwc_.get());
+}
+
+// The controller observes the worker's OTR profile so it tears the worker down
+// before that profile is destroyed, and ignores any other profile.
+TEST_F(OnDeviceSpeechRecognitionControllerTest,
+       ProfileDestructionTearsDownObservedOnly) {
+  SetInstalled(true);
+  Session s = StartSession();
+  ASSERT_NE(nullptr, last_bwc_.get());
+
+  // A different profile's destruction is ignored.
+  controller_->OnProfileWillBeDestroyed(&other_profile_);
+  EXPECT_NE(nullptr, last_bwc_.get());
+
+  // The observed OTR profile's destruction tears the worker down. Invoking the
+  // callback directly exercises the controller's response without dragging in
+  // real profile-destruction machinery.
+  controller_->OnProfileWillBeDestroyed(&otr_profile_);
+  EXPECT_EQ(nullptr, last_bwc_.get());
+}
+
+// Browser shutdown destroys the profile manager without necessarily telling the
+// OTR profile first, so the worker has to be released from here too. Destroying
+// the real ProfileManager rather than calling the callback directly is what
+// makes this cover the observation itself, not just the response to it.
+TEST_F(OnDeviceSpeechRecognitionControllerTest,
+       ProfileManagerDestructionTearsDown) {
+  SetInstalled(true);
+  Session s = StartSession();
+  ASSERT_NE(nullptr, last_bwc_.get());
+
+  profile_manager_.reset();
+  EXPECT_EQ(nullptr, last_bwc_.get());
+}
+
+// Worker creation is asynchronous, so a shutdown can land before it finishes.
+// The teardown invalidates the pending creation callback, so a worker that
+// arrives after it is ignored instead of being taken up in a dying profile.
+TEST_F(OnDeviceSpeechRecognitionControllerTest,
+       ProfileManagerDestructionWhileStartingDropsCreationReply) {
+  SetInstalled(true);
+  capture_created_ = true;
+
+  // Capture the creation reply, leaving the controller in kRendererStarting.
+  Session s = StartSession();
+  ASSERT_FALSE(captured_created_.is_null());
+  auto pending_created = std::move(captured_created_);
+  auto pending_delegate = captured_delegate_;
+
+  profile_manager_.reset();
+
+  raw_ptr<FakeBackgroundWebContents> pending_bwc = nullptr;
+  std::move(pending_created)
+      .Run(MakeFakeBwc(pending_delegate, &pending_bwc), &otr_profile_);
+  EXPECT_EQ(nullptr, pending_bwc);
+}
+
+// Teardown returns the controller to kIdle, so a Start() after shutdown looks
+// like a normal boot. Calling the callback directly leaves a live
+// ProfileManager behind, so only the shutdown flag can stop that boot.
+TEST_F(OnDeviceSpeechRecognitionControllerTest, StartAfterShutdownDoesNotBoot) {
+  SetInstalled(true);
+  Session s1 = StartSession();
+  ASSERT_NE(nullptr, last_bwc_.get());
+
+  controller_->OnProfileManagerDestroying();
+  ASSERT_EQ(nullptr, last_bwc_.get());
+
+  Session s2 = StartSession();
+  EXPECT_EQ(nullptr, last_bwc_.get());
+  EXPECT_EQ(1, bwc_created_count_);
+}
+
+// A shutdown while no worker is up reaches nobody, so the flag stays unset. A
+// Start() after it must still not boot: no manager, no guest profile.
+TEST_F(OnDeviceSpeechRecognitionControllerTest,
+       StartWithoutProfileManagerDoesNotBoot) {
+  SetInstalled(true);
+  profile_manager_.reset();
+
+  Session s = StartSession();
+  EXPECT_EQ(nullptr, last_bwc_.get());
+  EXPECT_EQ(0, bwc_created_count_);
+}
+
+// The worker environment comes up but the worker never registers its factory.
+// The 30s startup timer tears it down and drops the queued session so the
+// engine sees a failure instead of hanging.
+TEST_F(OnDeviceSpeechRecognitionControllerTest, StartupTimeoutTearsDown) {
+  SetInstalled(true);
+  Session s = StartSession();
+  ASSERT_NE(nullptr, last_bwc_.get());
+
+  task_environment_.FastForwardBy(base::Seconds(31));
+  EXPECT_EQ(nullptr, last_bwc_.get());
+  // The queued session's audio pipe is dropped, surfacing as a failure.
+  WaitForDisconnect(s.input);
+  EXPECT_FALSE(s.input.is_connected());
+}
+
+// A creation reply from a torn-down cycle must not land in a later cycle and
+// adopt a stale worker. StopWorker()'s InvalidateWeakPtrs() drops the reply;
+// the state check alone is insufficient because the later cycle is also
+// kRendererStarting.
+TEST_F(OnDeviceSpeechRecognitionControllerTest, StaleBwcCreationReplyDropped) {
+  SetInstalled(true);
+  capture_created_ = true;
+
+  // Cycle 1: capture its weak-bound creation reply, then take it aside before
+  // the next cycle overwrites the captured slot.
+  Session s1 = StartSession();
+  auto stale_created = std::move(captured_created_);
+  auto stale_delegate = captured_delegate_;
+
+  // The startup timer tears cycle 1 down, invalidating the captured reply.
+  task_environment_.FastForwardBy(base::Seconds(31));
+
+  // Cycle 2: back in kRendererStarting (its reply is captured, not run).
+  Session s2 = StartSession();
+
+  // Deliver the stale cycle-1 reply. It must be ignored (its weak pointer was
+  // invalidated), so the worker it carries is dropped, not adopted into cycle
+  // 2. Were it adopted, the controller would hold the fake and keep it alive.
+  raw_ptr<FakeBackgroundWebContents> stale_bwc = nullptr;
+  std::move(stale_created)
+      .Run(MakeFakeBwc(stale_delegate, &stale_bwc), &otr_profile_);
+  EXPECT_EQ(nullptr, stale_bwc);
+}
+
+// RegisterFactory is a no-op unless the controller is in kRendererStarting. A
+// register in kIdle is ignored, and a second register after the worker has
+// advanced past kRendererStarting is ignored too (state has moved on), so the
+// live worker is untouched.
+TEST_F(OnDeviceSpeechRecognitionControllerTest,
+       RegisterFactoryIgnoredOutsideRendererStarting) {
+  SetInstalled(true);
+
+  // In kIdle (no Start yet): registering a factory does nothing.
+  {
+    FakeSpeechRecognitionFactory early;
+    RegisterFactoryWith(early);
+    EXPECT_EQ(0, early.init_count());
+    EXPECT_EQ(nullptr, last_bwc_.get());
+  }
+
+  // Boot the worker and load the model, then a second register is ignored.
+  Session s = StartSession();
+  RegisterFactory();
+  WaitForInit(fake_factory_);
+  ASSERT_EQ(1, fake_factory_.init_count());
+  {
+    FakeSpeechRecognitionFactory late;
+    RegisterFactoryWith(late);
+    EXPECT_EQ(0, late.init_count());
+    // The original worker was not reloaded.
+    EXPECT_EQ(1, fake_factory_.init_count());
+    EXPECT_NE(nullptr, last_bwc_.get());
+  }
+}
+
+// A misbehaving renderer may request the FactoryHost interface again while
+// already bound. The second bind supersedes the first rather than tripping a
+// DCHECK, so the first host remote disconnects.
+TEST_F(OnDeviceSpeechRecognitionControllerTest,
+       BindFactoryHostSupersedesPrevious) {
+  mojo::Remote<local_ai::mojom::SpeechRecognitionFactoryHost> host1;
+  controller_->BindFactoryHost(host1.BindNewPipeAndPassReceiver());
+  host1.FlushForTesting();
+  ASSERT_TRUE(host1.is_connected());
+
+  mojo::Remote<local_ai::mojom::SpeechRecognitionFactoryHost> host2;
+  controller_->BindFactoryHost(host2.BindNewPipeAndPassReceiver());
+  host2.FlushForTesting();
+
+  WaitForDisconnect(host1);
+  EXPECT_FALSE(host1.is_connected());
+  EXPECT_TRUE(host2.is_connected());
+}
+
+TEST_F(OnDeviceSpeechRecognitionControllerTest, ModelFileReadFailureTearsDown) {
+  // Install dir is set (so Start proceeds) but the model files are absent, so
+  // ReadNemotronOrtFiles returns null and the worker tears down without Init.
+  local_ai::OnDeviceSpeechModelsState::GetInstance()->SetInstallDir(
+      local_ai::OnDeviceSpeechModel::kEnglish, temp_dir_.GetPath());
+  Session s = StartSession();
+  ASSERT_NE(nullptr, last_bwc_.get());
+  RegisterFactory();
+
+  // TearDown disconnects the engine-held session; the worker is gone by then.
+  WaitForDisconnect(s.session);
+  EXPECT_EQ(nullptr, last_bwc_.get());
+  EXPECT_EQ(0, fake_factory_.init_count());
+}
+
+TEST_F(OnDeviceSpeechRecognitionControllerTest, InitFailureTearsDown) {
+  SetInstalled(true);
+  fake_factory_.set_init_success(false);
+
+  Session s = StartSession();
+  RegisterFactory();
+
+  // TearDown disconnects the engine-held session; the worker is gone by then.
+  WaitForDisconnect(s.session);
+  EXPECT_EQ(nullptr, last_bwc_.get());
+}
+
+// The model-file read hops to a ThreadPool and replies weakly. If the cycle is
+// torn down while the read is in flight, the reply must not Init a later
+// cycle's factory. To prove the weak invalidation (and not the is_bound guard)
+// is what protects this, cycle 2 binds a fresh factory before the stale reply
+// lands: the guard would pass against that live factory, so only the weak drop
+// keeps it from being Init'd twice.
+TEST_F(OnDeviceSpeechRecognitionControllerTest,
+       StaleModelReadReplyDroppedAfterRestart) {
+  SetInstalled(true);
+
+  // Register the factory and tear down through the controller's public methods
+  // directly rather than over a mojo pipe. FlushForTesting on a pipe spins a
+  // nested loop that would let the tiny fixture read complete inline; a direct
+  // call posts the read and tears down with no pump in between, so the reply is
+  // genuinely in flight when InvalidateWeakPtrs() drops it.
+
+  // Cycle 1: reach kModelLoading, which posts the ThreadPool read.
+  Session s1 = StartSession();
+  controller_->RegisterFactory(fake_factory_.BindRemote());
+
+  // Tear cycle 1 down before the read reply is pumped.
+  controller_->OnProfileWillBeDestroyed(&otr_profile_);
+  ASSERT_EQ(nullptr, last_bwc_.get());
+
+  // Cycle 2: a fresh worker and factory, also reaching kModelLoading.
+  FakeSpeechRecognitionFactory fake2;
+  Session s2 = StartSession();
+  controller_->RegisterFactory(fake2.BindRemote());
+
+  // Drain the pool: both reads complete. Cycle 1's reply is weak-invalidated
+  // and dropped, so only cycle 2's reply runs and fake2 is Init'd exactly once.
+  // Were the stale reply not dropped, it would Init the now-live fake2 a second
+  // time, since the is_bound guard passes against the fresh factory.
+  WaitForInit(fake2);
+  EXPECT_EQ(1, fake2.init_count());
+  // The torn-down cycle-1 factory was never Init'd.
+  EXPECT_EQ(0, fake_factory_.init_count());
+}
+
+// A worker crash after Ready (its factory remote disconnects) tears the worker
+// down and disconnects the AsrSession the engine is holding.
+TEST_F(OnDeviceSpeechRecognitionControllerTest, FactoryDisconnectTearsDown) {
+  Session s = DriveToReady();
+  ASSERT_NE(nullptr, last_bwc_.get());
+  ASSERT_TRUE(s.session.is_connected());
+
+  // The controller tears down when it sees the factory remote drop, which
+  // disconnects the engine-held AsrSession.
+  fake_factory_.ResetReceiver();
+  WaitForDisconnect(s.session);
+  EXPECT_EQ(nullptr, last_bwc_.get());
+}
+
+// A worker that reached Ready must survive past the startup timeout: the timer
+// is stopped in RegisterFactory, and OnStartupTimeout's state guard would
+// ignore a stale fire regardless. Prove it is still serving by forwarding a new
+// session to the same worker.
+TEST_F(OnDeviceSpeechRecognitionControllerTest,
+       ReadyWorkerSurvivesStartupTimeout) {
+  Session s = DriveToReady();
+  ASSERT_NE(nullptr, last_bwc_.get());
+  ASSERT_EQ(1, fake_factory_.created_asr_stream_count());
+
+  task_environment_.FastForwardBy(base::Seconds(31));
+  ASSERT_NE(nullptr, last_bwc_.get());
+
+  Session s2 = StartSession();
+  WaitForCreatedAsrStreams(fake_factory_, 2);
+  EXPECT_EQ(1, bwc_created_count_);
+}
+
+TEST_F(OnDeviceSpeechRecognitionControllerTest,
+       IdleTimeoutTearsDownAfterLastSession) {
+  Session s = DriveToReady();
+  ASSERT_NE(nullptr, last_bwc_.get());
+
+  // Dropping the last AsrSession arms the idle timer. FastForwardBy runs the
+  // immediate disconnect task first, arming the timer. The worker stays up
+  // until the idle timeout fires.
+  s.session.reset();
+  // At kIdleTimeout - 1s, the worker is still up.
+  task_environment_.FastForwardBy(kIdleTimeout - base::Seconds(1));
+  EXPECT_NE(nullptr, last_bwc_.get());
+  // At kIdleTimeout + 1s, the worker is gone.
+  task_environment_.FastForwardBy(base::Seconds(2));
+  EXPECT_EQ(nullptr, last_bwc_.get());
+}
+
+TEST_F(OnDeviceSpeechRecognitionControllerTest, NewSessionCancelsIdleTimeout) {
+  Session s = DriveToReady();
+  ASSERT_NE(nullptr, last_bwc_.get());
+
+  // Drop the session and advance a little so the disconnect is processed and
+  // the idle timer arms.
+  s.session.reset();
+  task_environment_.FastForwardBy(base::Seconds(1));
+
+  // A new session before the timeout stops the armed timer.
+  mojo::Remote<local_ai::mojom::AsrSession> reconnect(
+      controller_->GetAsrSession());
+
+  task_environment_.FastForwardBy(kIdleTimeout + base::Seconds(1));
+  EXPECT_NE(nullptr, last_bwc_.get());
+}
+
+// With more than one session, the idle timer arms only when the last session
+// disconnects, not on each disconnect.
+TEST_F(OnDeviceSpeechRecognitionControllerTest,
+       IdleTimerArmedOnlyOnLastSession) {
+  Session s1 = DriveToReady();
+  Session s2 = StartSession();
+  WaitForCreatedAsrStreams(fake_factory_, 2);
+  ASSERT_NE(nullptr, last_bwc_.get());
+
+  // Dropping one of two sessions does not arm the timer.
+  s1.session.reset();
+  task_environment_.FastForwardBy(kIdleTimeout + base::Seconds(1));
+  EXPECT_NE(nullptr, last_bwc_.get());
+
+  // Dropping the last session arms it, and the worker tears down.
+  s2.session.reset();
+  task_environment_.FastForwardBy(kIdleTimeout + base::Seconds(1));
+  EXPECT_EQ(nullptr, last_bwc_.get());
+}
+
+}  // namespace speech

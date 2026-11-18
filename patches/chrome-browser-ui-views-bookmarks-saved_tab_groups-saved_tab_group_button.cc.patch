@@ -1,0 +1,13 @@
+diff --git a/chrome/browser/ui/views/bookmarks/saved_tab_groups/saved_tab_group_button.cc b/chrome/browser/ui/views/bookmarks/saved_tab_groups/saved_tab_group_button.cc
+index 9593ea1fc4e364be1b6a558523d288fc90d36ea6..b805e13677fa299b6750a6bfe13928b1e5c8cc02 100644
+--- a/chrome/browser/ui/views/bookmarks/saved_tab_groups/saved_tab_group_button.cc
++++ b/chrome/browser/ui/views/bookmarks/saved_tab_groups/saved_tab_group_button.cc
+@@ -260,7 +260,7 @@ void SavedTabGroupButton::UpdateButtonLayout() {
+                       features::IsRoundedIconsEnabled() ? kGroupCustomIcon
+                                                         : kPeopleGroupOldIcon,
+                       GetSavedTabGroupForegroundColorId(tab_group_color_id_),
+-                      gfx::kFaviconSize));
++                      brave::GetToolbarsIconSize().value_or(gfx::kFaviconSize)));
+   }
+ 
+   if (GetText().empty()) {

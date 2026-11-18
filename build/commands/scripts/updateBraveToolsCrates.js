@@ -1,0 +1,23 @@
+/* Copyright (c) 2025 The Brave Authors. All rights reserved.
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+ * You can obtain one at https://mozilla.org/MPL/2.0/. */
+
+import config from '../lib/config.ts'
+import path from 'node:path'
+import util from '../lib/util.ts'
+import { program } from '../lib/program.ts'
+
+// Every argument, --help included, is update.py's.
+program
+  .helpOption(false)
+  .allowUnknownOption()
+  .allowExcessArguments()
+  .action(() => {
+    const args = [
+      path.join(config.srcDir, 'brave', 'tools', 'crates', 'update.py'),
+      ...process.argv.slice(2),
+    ]
+    util.run('vpython3', args, config.defaultOptions)
+  })
+  .parse()

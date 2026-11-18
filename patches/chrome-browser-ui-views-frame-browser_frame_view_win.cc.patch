@@ -1,0 +1,15 @@
+diff --git a/chrome/browser/ui/views/frame/browser_frame_view_win.cc b/chrome/browser/ui/views/frame/browser_frame_view_win.cc
+index 8bcc77c6b9a6e0926fa220831cd32773f010d0ae..adbf3c35630b5b9e24514314af53ddaa05251db8 100644
+--- a/chrome/browser/ui/views/frame/browser_frame_view_win.cc
++++ b/chrome/browser/ui/views/frame/browser_frame_view_win.cc
+@@ -96,7 +96,9 @@ BrowserFrameViewWin::BrowserFrameViewWin(BrowserWidget* widget,
+   BrowserWindowInterface* browser = browser_view->browser();
+   bool supports_title_bar =
+       WindowFeatureController::From(browser)->SupportsWindowFeature(
+-          WindowFeatureController::WindowFeature::kFeatureTitleBar);
++          WindowFeatureController::WindowFeature::kFeatureTitleBar) ||
++        (VerticalTabController::From(browser) &&
++         VerticalTabController::From(browser)->SupportsBraveVerticalTabs());
+ 
+   // Only show icons if the browser supports title bars.
+   if (supports_title_bar) {

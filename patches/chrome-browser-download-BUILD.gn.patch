@@ -1,0 +1,21 @@
+diff --git a/chrome/browser/download/BUILD.gn b/chrome/browser/download/BUILD.gn
+index 6f9c54ba8b703bb3980db184c362004fcfd7ee49..6d4352f611ff019993f7f8380ccc201ab669ea51 100644
+--- a/chrome/browser/download/BUILD.gn
++++ b/chrome/browser/download/BUILD.gn
+@@ -237,6 +237,7 @@ source_set("impl") {
+     "//ui/base/unowned_user_data",
+     "//url",
+   ]
++  deps += [ "//brave/components/brave_shields/core/browser" ]
+ 
+   if (is_android) {
+     sources += [
+@@ -378,7 +379,7 @@ source_set("impl") {
+     sources += [ "drag_download_item_aura.cc" ]
+   }
+ 
+-  if (is_android && !enable_desktop_android_extensions) {
++  if (is_android && !enable_extensions_core) {
+     sources += [ "download_crx_util_android.cc" ]
+   }
+ 

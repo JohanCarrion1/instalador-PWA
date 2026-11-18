@@ -1,0 +1,23 @@
+diff --git a/chrome/browser/ui/views/device_chooser_content_view.h b/chrome/browser/ui/views/device_chooser_content_view.h
+index dd4da705683546f15322e725e279f4c688ae0651..138fa696a372ba9ff069b43b8a89a2dbe20dc5ee 100644
+--- a/chrome/browser/ui/views/device_chooser_content_view.h
++++ b/chrome/browser/ui/views/device_chooser_content_view.h
+@@ -17,6 +17,8 @@
+ #include "ui/gfx/range/range.h"
+ #include "ui/views/view.h"
+ 
++class BrowserWindowInterface;
++
+ namespace views {
+ class Checkbox;
+ class Label;
+@@ -82,6 +84,9 @@ class DeviceChooserContentView : public views::View,
+   views::Throbber* ThrobberForTesting();
+   views::Label* ThrobberLabelForTesting();
+ 
++  std::unique_ptr<views::View> CreateFootnoteView(
++      BrowserWindowInterface* browser);
++
+  private:
+   friend class DeviceChooserContentViewTest;
+ 

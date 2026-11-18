@@ -1,0 +1,21 @@
+diff --git a/chrome/browser/ui/views/side_panel/side_panel_coordinator.h b/chrome/browser/ui/views/side_panel/side_panel_coordinator.h
+index 73bad76d1e3f736cdcdc741afb304b9871a8fb77..a63a4811938ec0ae51974951f6c9ca8f2a3ff76c 100644
+--- a/chrome/browser/ui/views/side_panel/side_panel_coordinator.h
++++ b/chrome/browser/ui/views/side_panel/side_panel_coordinator.h
+@@ -36,7 +36,7 @@ class View;
+ // Existence and value of registries' active_entry() determines which entry is
+ // visible for a given tab where the order of precedence is contextual
+ // registry's active_entry() then global registry's.
+-class SidePanelCoordinator final : public SidePanelUIBase,
++class SidePanelCoordinator : public SidePanelUIBase,
+                                    public views::ViewObserver {
+  public:
+   explicit SidePanelCoordinator(BrowserWindowInterface* browser);
+@@ -74,6 +74,7 @@ class SidePanelCoordinator final : public SidePanelUIBase,
+   SidePanelEntry* GetLoadingEntryForTesting() const;
+ 
+  private:
++  friend class BraveSidePanelCoordinator;
+   // Returns the corresponding entry for `entry_key` or a nullptr if this key is
+   // not registered in the currently observed registries. This looks through the
+   // active contextual registry first, then the global registry.

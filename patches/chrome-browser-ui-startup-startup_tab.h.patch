@@ -1,0 +1,34 @@
+diff --git a/chrome/browser/ui/startup/startup_tab.h b/chrome/browser/ui/startup/startup_tab.h
+index 494d35877bec129310bef73cec9aebc722d135aa..1f9e285c37e25e880d72e6e30a59b9e7807da6d3 100644
+--- a/chrome/browser/ui/startup/startup_tab.h
++++ b/chrome/browser/ui/startup/startup_tab.h
+@@ -7,8 +7,13 @@
+ 
+ #include <vector>
+ 
++#include "brave/components/containers/buildflags/buildflags.h"
+ #include "url/gurl.h"
+ 
++#if BUILDFLAG(ENABLE_CONTAINERS)
++#include "brave/components/containers/core/browser/container_specifier.h"
++#endif
++
+ // Represents tab data at startup.
+ struct StartupTab {
+   enum class Type {
+@@ -31,6 +36,15 @@ struct StartupTab {
+   // True if this tab was launched from an untrusted external custom protocol
+   // (e.g., google-chrome://) that was stripped on startup.
+   bool is_untrusted_launch = false;
++
++#if BUILDFLAG(ENABLE_CONTAINERS)
++  containers::ContainerSpecifier container;
++#endif
++
++  StartupTab(const StartupTab&);
++  StartupTab& operator=(const StartupTab&);
++  StartupTab(StartupTab&&) noexcept;
++  StartupTab& operator=(StartupTab&&) noexcept;
+ };
+ 
+ using StartupTabs = std::vector<StartupTab>;
