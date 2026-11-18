@@ -69,7 +69,8 @@ object PwaFetcher {
                 if (icons != null) {
                     for (i in 0 until icons.length()) {
                         val ic = icons.optJSONObject(i) ?: continue
-                        val src = ic.optString("src").ifBlank { continue }
+                        val src = ic.optString("src")
+                        if (src.isBlank()) continue
                         val type = ic.optString("type")
                         if (type.contains("svg") || src.substringBefore('?').endsWith(".svg", true)) continue
                         candidates += IconCandidate(
