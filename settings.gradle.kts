@@ -15,4 +15,5 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "instalador-pwa"
-include(":app")
+include(":app")   // instalador con accesos directos
+include(":pwa")   // plantilla de app independiente (una por PWA)

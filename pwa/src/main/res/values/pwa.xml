@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Valores por defecto. tools/make_pwa.py sobrescribe este archivo para cada PWA. -->
+<resources>
+    <string name="app_name">PWA</string>
+    <string name="pwa_url">https://example.com</string>
+    <color name="pwa_theme">#202124</color>
+    <color name="pwa_icon_bg">#202124</color>
+</resources>

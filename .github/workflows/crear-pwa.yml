@@ -1,0 +1,99 @@
+name: Crear PWA
+
+# Genera un APK independiente (propio paquete, nombre e ícono) para una PWA.
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: "URL de la PWA (ej. https://aistudio.xiaomimimo.com)"
+        required: true
+      name:
+        description: "Nombre de la app (opcional, por defecto el del manifest)"
+        required: false
+      package:
+        description: "ID de paquete (opcional, por defecto se deduce de la URL)"
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Aceptar licencias del SDK (el runner ya trae el SDK)
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Instalar Pillow
+        run: pip install pillow
+
+      - name: Leer la PWA y preparar la plantilla
+        id: pwa
+        env:
+          PWA_URL: ${{ inputs.url }}
+          PWA_NAME: ${{ inputs.name }}
+          PWA_PACKAGE: ${{ inputs.package }}
+        run: python3 tools/make_pwa.py --url "$PWA_URL" --name "$PWA_NAME" --package "$PWA_PACKAGE"
+
+      # Llave de firma estable: se genera una vez y se reutiliza (caché) para que
+      # las actualizaciones de una misma PWA se instalen encima de la anterior.
+      - name: Restaurar llave de firma
+        id: keycache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/signing
+          key: pwa-signing-key-v1
+
+      - name: Preparar llave de firma
+        run: |
+          DIR="$RUNNER_TEMP/signing"
+          mkdir -p "$DIR"
+          if [ ! -f "$DIR/pwa.keystore" ]; then
+            PASS=$(openssl rand -hex 16)
+            echo "$PASS" > "$DIR/pass.txt"
+            keytool -genkeypair -keystore "$DIR/pwa.keystore" -alias pwa -keyalg RSA -keysize 2048 \
+              -validity 36500 -storepass "$PASS" -keypass "$PASS" -dname "CN=Instalador PWA"
+          fi
+          echo "KEYSTORE_PATH=$DIR/pwa.keystore" >> "$GITHUB_ENV"
+          echo "KEYSTORE_PASSWORD=$(cat "$DIR/pass.txt")" >> "$GITHUB_ENV"
+          echo "KEY_ALIAS=pwa" >> "$GITHUB_ENV"
+
+      - name: Compilar APK
+        run: >
+          gradle :pwa:assembleRelease --no-daemon --stacktrace
+          -PpwaId=${{ steps.pwa.outputs.package }}
+          -PpwaVersion=${{ github.run_number }}
+
+      - name: Nombrar el APK
+        run: |
+          mkdir -p out
+          cp pwa/build/outputs/apk/release/*.apk "out/${{ steps.pwa.outputs.apkname }}.apk"
+          ls -l out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pwa.outputs.apkname }}-apk
+          path: out/${{ steps.pwa.outputs.apkname }}.apk
+          if-no-files-found: error
+
+      - name: Publicar en Releases (descarga directa del APK)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PWA_TITLE: ${{ steps.pwa.outputs.name }}
+          PWA_PKG: ${{ steps.pwa.outputs.package }}
+        run: |
+          gh release create "pwa-${{ github.run_number }}" \
+            "out/${{ steps.pwa.outputs.apkname }}.apk" \
+            --title "$PWA_TITLE" \
+            --notes "APK independiente de $PWA_TITLE. Paquete: $PWA_PKG"
