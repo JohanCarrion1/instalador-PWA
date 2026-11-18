@@ -47,3 +47,8 @@ android {
         jvmTarget = "17"
     }
 }
+
+dependencies {
+    // Para presentarse como Chrome (cabeceras de cliente) y no enviar X-Requested-With
+    implementation("androidx.webkit:webkit:1.11.0")
+}
